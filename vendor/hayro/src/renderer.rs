@@ -262,6 +262,34 @@ fn nearest_premultiplied_rgba(
 /// icons, QR codes and pixel art are usually far smaller and keep their hard pixels.
 const SMOOTHED_IMAGE_SIDE: u32 = 512;
 
+/// PdfCraft patch: the most distinct colours a smaller image without `/Interpolate` may have and
+/// still keep its hard pixels when enlarged. QR codes, bilevel images and pixel art use a few;
+/// screenshots and photos have hundreds (antialiased text alone has dozens of shades), and drawn
+/// nearest-neighbour their text came out as staircases when zoomed.
+const HARD_PIXEL_COLOURS: usize = 16;
+
+/// PdfCraft patch: whether `image` has more than [`HARD_PIXEL_COLOURS`] distinct colours. Stops at
+/// the first colour past the limit, so a screenshot or photo is decided within its first rows.
+fn has_many_colours(image: &ImageData) -> bool {
+    let mut seen: Vec<u32> = Vec::with_capacity(HARD_PIXEL_COLOURS);
+    let mut many = |colour: u32| {
+        if seen.contains(&colour) {
+            return false;
+        }
+        seen.push(colour);
+        seen.len() > HARD_PIXEL_COLOURS
+    };
+    match image {
+        ImageData::Luma(luma) => luma.data.iter().any(|&v| many(u32::from(v))),
+        ImageData::Rgb(rgb) => rgb
+            .data
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .any(|&[r, g, b]| many(u32::from_be_bytes([0, r, g, b]))),
+    }
+}
+
 /// PdfCraft patch: fixed-point unit of [`area_shrink`]'s weights.
 const AREA_ONE: u64 = 1 << 16;
 
@@ -1193,13 +1221,16 @@ impl Renderer {
         // Scans rarely ask, and drawn nearest-neighbour each sample of a zoomed scan became a
         // block, so the edges of its text were staircases. Bicubic looked the same on a zoomed
         // 300 dpi scan and drew its tiles five times slower. Smaller images (icons, QR codes,
-        // pixel art) keep their hard pixels. A scan shrunk on one side and stretched on the other
-        // is smoothed too: the area shrink leaves the shrunk side at 1:1, where bilinear adds
-        // nothing, and the stretched side would otherwise be drawn nearest-neighbour.
+        // pixel art) keep their hard pixels, unless they have many colours: a screenshot of a
+        // terminal or a slide is small too, and its text must not turn into staircases either.
+        // A scan shrunk on one side and stretched on the other is smoothed too: the area shrink
+        // leaves the shrunk side at 1:1, where bilinear adds nothing, and the stretched side
+        // would otherwise be drawn nearest-neighbour.
         if !interpolate
             && !self.in_type3_glyph
             && (x_scale > 1.0 || y_scale > 1.0)
-            && source_width.min(source_height) >= SMOOTHED_IMAGE_SIDE
+            && (source_width.min(source_height) >= SMOOTHED_IMAGE_SIDE
+                || has_many_colours(&image_data))
         {
             quality = ImageQuality::Medium;
         }
